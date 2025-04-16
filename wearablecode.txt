@@ -1,0 +1,177 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <DHT.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Servo.h>
+
+// ----- OLED Settings -----
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 32
+#define OLED_RESET -1  // Not used
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ----- RTC -----
+RTC_DS3231 rtc;
+
+// ----- DHT11 Settings -----
+#define DHTPIN 2
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ----- MQ135 Settings -----
+#define MQ135_PIN A0
+
+// ----- RFID Settings -----
+#define RFID_SS_PIN 10
+#define RFID_RST_PIN 9
+MFRC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
+// Authorized UID for the RFID tag (example: DE 44 B5 02)
+byte authorizedUID[] = {0xDE, 0x44, 0xB5, 0x02};
+
+// ----- Servo Settings -----
+#define SERVO_PIN 3
+Servo doorServo;
+bool doorOpen = false;  // false = closed, true = open
+
+// ----- Global Timing Variables -----
+unsigned long sensorUpdateDelay = 500;  // Update sensor display every 500 ms
+
+// ----- Utility function to compare RFID UIDs -----
+bool compareUID(byte *uid1, byte *uid2, byte length) {
+  for (byte i = 0; i < length; i++) {
+    if (uid1[i] != uid2[i]) return false;
+  }
+  return true;
+}
+
+// ----- Utility function to display a message on the OLED -----
+void showOLEDMessage(String msg, unsigned long duration) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 10);
+  display.println(msg);
+  display.display();
+  Serial.println(msg);
+  delay(duration);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  // Initialize OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("OLED init failed"));
+    while(1);
+  }
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  
+  // Initialize RTC
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    while(1);
+  }
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power; setting to compile time");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  // Initialize DHT11 sensor
+  dht.begin();
+
+  // Initialize RFID module
+  SPI.begin();
+  rfid.PCD_Init();
+
+  // Initialize Servo
+  doorServo.attach(SERVO_PIN);
+  doorServo.write(0);  // Start with door closed
+
+  // Startup message
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("System Initializing...");
+  display.display();
+  delay(2000);
+  display.clearDisplay();
+}
+
+void loop() {
+  // ----- Check for RFID Card Event -----
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    // Read UID into a byte array and compare
+    if (compareUID(rfid.uid.uidByte, authorizedUID, rfid.uid.size)) {
+      if (!doorOpen) {
+        doorServo.write(90); // Open door
+        doorOpen = true;
+        showOLEDMessage("Door Opened", 2000);
+        Serial.println("Door Opened");
+      } else {
+        doorServo.write(0); // Close door
+        doorOpen = false;
+        showOLEDMessage("Door Closed", 2000);
+        Serial.println("Door Closed");
+      }
+    } else {
+      showOLEDMessage("Access Denied", 2000);
+      Serial.println("Access Denied");
+    }
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+  
+  // ----- Normal Operation: Display Sensor Data -----
+  // Get current time from RTC
+  DateTime now = rtc.now();
+  char timeStr[9]; // Format: HH:MM:SS
+  sprintf(timeStr, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+
+  // Read MQ135 (Air Quality)
+  int aqValue = analogRead(MQ135_PIN);
+
+  // Read DHT11 (Temperature & Humidity)
+  float temp = dht.readTemperature();   // °C
+  float hum = dht.readHumidity();         // Percentage
+
+  // Build OLED message:
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print("Time: ");
+  display.println(timeStr);
+  display.print("AQ: ");
+  display.println(aqValue);
+  display.print("Temp: ");
+  if (isnan(temp)) {
+    display.println("Err");
+  } else {
+    display.print(temp, 1);
+    display.println(" C");
+  }
+  display.print("Hum: ");
+  if (isnan(hum)) {
+    display.println("Err");
+  } else {
+    display.print(hum, 1);
+    display.println(" %");
+  }
+  display.display();
+  
+  // Also print everything to Serial Monitor
+  Serial.print("Time: ");
+  Serial.print(timeStr);
+  Serial.print(" | AQ: ");
+  Serial.print(aqValue);
+  Serial.print(" | Temp: ");
+  Serial.print(temp, 1);
+  Serial.print(" C | Hum: ");
+  Serial.print(hum, 1);
+  Serial.println(" %");
+
+  delay(sensorUpdateDelay);
+}
